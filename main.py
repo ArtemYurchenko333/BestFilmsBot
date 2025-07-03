@@ -5,9 +5,10 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from telegram.error import BadRequest # Импортируем BadRequest для обработки ошибок
+from telegram.error import BadRequest
 import google.generativeai as genai
 from telegram.helpers import escape_markdown
+import re # Импортируем модуль для регулярных выражений
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -98,13 +99,16 @@ def create_tables_if_not_exists():
                     user_first_name VARCHAR(255),
                     user_last_name VARCHAR(255),
                     user_country VARCHAR(255),
-                    user_city VARCHAR(255),
-                    user_phone_number VARCHAR(20),
                     genres TEXT NOT NULL,
                     years TEXT NOT NULL,
                     keywords TEXT,
+                    film1 VARCHAR(255),
+                    film2 VARCHAR(255),
+                    film3 VARCHAR(255),
                     gemini_response TEXT NOT NULL,
                     requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    user_city VARCHAR(255),
+                    user_phone_number VARCHAR(20),
                     FOREIGN KEY (user_id) REFERENCES users(id)
                 );
             """)
@@ -142,34 +146,69 @@ async def save_user_data(user_id: int, username: str, first_name: str, last_name
             if conn:
                 conn.close()
 
-async def save_film_request(user_id: int, username: str, first_name: str, last_name: str,
-                             genres: str, years: str, keywords: str, gemini_response: str):
+async def save_film_request(user_id: int, genres: str, years: str, keywords: str, gemini_response: str,
+                             film1_name: str = None, film2_name: str = None, film3_name: str = None,
+                             username: str = None, first_name: str = None, last_name: str = None,
+                             country: str = "", city: str = "", phone_number: str = ""):
     conn = get_db_connection()
     if conn:
         try:
             cursor = conn.cursor()
-            # Заглушки для полей, которые не запрашиваются в боте, но есть в таблице films
-            country = ""
-            city = ""
-            phone_number = ""
 
+            # Обновленный SQL-запрос INSERT с новым порядком колонок
             cursor.execute(
                 """
-                INSERT INTO films (user_id, telegram_username, user_first_name, user_last_name,
-                                   user_country, user_city, user_phone_number,
-                                   genres, years, keywords, gemini_response)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
+                INSERT INTO films (
+                    user_id, telegram_username, user_first_name, user_last_name, user_country,
+                    genres, years, keywords, gemini_response,
+                    film1, film2, film3,
+                    requested_at,
+                    user_city, user_phone_number
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, DEFAULT, %s, %s);
                 """,
-                (user_id, username, first_name, last_name, country, city, phone_number,
-                 genres, years, keywords, gemini_response)
+                (user_id, username, first_name, last_name, country, # Эти 4 теперь в начале
+                 genres, years, keywords, gemini_response,
+                 film1_name, film2_name, film3_name, # Названия фильмов
+                 city, phone_number) # Эти 2 теперь в самом конце
             )
             conn.commit()
-            logger.info(f"Запрос на фильм для пользователя {user_id} успешно сохранен в БД.")
+            logger.info(f"Запрос на фильм для пользователя {user_id} успешно сохранен в БД с названиями фильмов.")
         except Exception as e:
             logger.error(f"Ошибка при сохранении запроса на фильм в базу данных: {e}")
         finally:
             if conn:
                 conn.close()
+
+# --- Вспомогательная функция для парсинга названий фильмов ---
+def extract_film_names(gemini_response_text: str) -> list:
+    """
+    Парсит ответ Gemini для извлечения названий фильмов.
+    Возвращает список из 3х названий фильмов (None, если фильм не найден).
+    """
+    film_names = [None, None, None]
+    
+    # Регулярное выражение для поиска строк, начинающихся с номера и точки (1., 2., 3.)
+    # Затем извлекаем текст до первого двоеточия или конца строки.
+    # Это очень простой и потенциально ненадежный парсинг.
+    pattern = r'^\s*(\d+)\.\s*(?:Название фильма:\s*)?([^:.]+)'
+    matches = re.findall(pattern, gemini_response_text, re.MULTILINE)
+
+    for num_str, name_candidate in matches:
+        num = int(num_str)
+        if 1 <= num <= 3:
+            # Очищаем название от лишних пробелов, точек и запятых в конце
+            cleaned_name = re.sub(r'[,.]\s*$', '', name_candidate).strip()
+            film_names[num - 1] = cleaned_name
+            logger.info(f"Парсинг: найден фильм {num}: '{cleaned_name}'")
+    
+    # Заполняем None, если фильмов меньше 3х
+    while len(film_names) < 3:
+        film_names.append(None)
+
+    logger.info(f"Извлеченные названия фильмов: {film_names}")
+    return film_names
+
 
 # --- Функции-обработчики команд и сообщений ---
 
@@ -239,7 +278,7 @@ async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
 
     if query.data.startswith("year_"):
         year_range_name = query.data.replace("year_", "")
-        context.user_data['selected_years'] = [year_range_name] # Теперь всегда один диапазон годов
+        context.user_data['selected_years'] = [year_range_name]
         logger.info(f"Пользователь {user_id} выбрал года: {year_range_name}. Текущие года: {context.user_data['selected_years']}")
 
         # Сразу переходим к вводу ключевых слов
@@ -266,7 +305,7 @@ async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
-        return ENTER_KEYWORDS # Переходим к следующему состоянию
+        return ENTER_KEYWORDS
 
     return SELECT_YEARS
 
@@ -296,10 +335,15 @@ async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"выпущенных в годах: {years_str}. "
         f"Ориентируйся на следующие ключевые слова/описание: '{keywords}'. "
         "Для каждого фильма укажи: Название, Год выпуска, Жанр(ы), Краткое описание (1-2 предложения). "
-        "Форматируй ответ так, чтобы его было легко читать. Только лучшие фильмы по этому запросу."
+        "Форматируй ответ как нумерованный список, например:\n"
+        "1. Название фильма 1: Год, Жанр. Краткое описание.\n"
+        "2. Название фильма 2: Год, Жанр. Краткое описание.\n"
+        "3. Название фильма 3: Год, Жанр. Краткое описание.\n"
+        "Только лучшие фильмы по этому запросу."
     )
 
     gemini_response_text = ""
+    film_names = [None, None, None] # Для хранения извлеченных названий фильмов
     try:
         response = model.generate_content(
             prompt_text,
@@ -313,20 +357,29 @@ async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         gemini_response_text = response.text
         await update.message.reply_text(gemini_response_text)
 
+        # --- НОВЫЙ ШАГ: Парсинг названий фильмов ---
+        film_names = extract_film_names(gemini_response_text)
+        
         # Сохраняем данные в базу данных
         await save_film_request(
-            user_id,
-            user.username,
-            user.first_name,
-            user.last_name,
-            genres_str,
-            years_str,
-            keywords,
-            gemini_response_text
+            user_id=user.id,
+            genres=genres_str,
+            years=years_str,
+            keywords=keywords,
+            gemini_response=gemini_response_text,
+            film1_name=film_names[0], # Название параметра функции остается *_name
+            film2_name=film_names[1],
+            film3_name=film_names[2],
+            username=user.username,
+            first_name=user.first_name,
+            last_name=user.last_name,
+            country=context.user_data.get('user_country', ''), # Взять из контекста, если есть
+            city=context.user_data.get('user_city', ''),       # Взять из контекста, если есть
+            phone_number=context.user_data.get('user_phone_number', '') # Взять из контекста, если есть
         )
 
     except Exception as e:
-        logger.error(f"Ошибка при обращении к Gemini API: {e}")
+        logger.error(f"Ошибка при обращении к Gemini API или обработке ответа: {e}")
         await update.message.reply_text(
             "Извини, произошла ошибка при получении информации о фильмах. Попробуй еще раз позже."
         )
@@ -397,7 +450,7 @@ async def back_to_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         is_selected = context.user_data.get('selected_years') and context.user_data['selected_years'][0] == year_range_name
         emoji = "✅ " if is_selected else ""
         keyboard.append([InlineKeyboardButton(f"{emoji}{year_range_name}", callback_data=f"year_{year_range_name}")])
-    keyboard.append([InlineKeyboardButton("⬅️ Назад к жанрам", callback_data="back_to_genres")]) # Кнопка назад к жанрам
+    keyboard.append([InlineKeyboardButton("⬅️ Назад к жанрам", callback_data="back_to_genres")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
@@ -429,7 +482,7 @@ def main() -> None:
                 CallbackQueryHandler(select_genres, pattern=r"^genre_")
             ],
             SELECT_YEARS: [
-                CallbackQueryHandler(select_years, pattern=r"^year_"), # Изменено для обработки только выбора года
+                CallbackQueryHandler(select_years, pattern=r"^year_"),
                 CallbackQueryHandler(back_to_genres, pattern="^back_to_genres$")
             ],
             ENTER_KEYWORDS: [
