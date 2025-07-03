@@ -5,6 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
+from telegram.error import BadRequest # Импортируем BadRequest для обработки ошибок
 import google.generativeai as genai
 from telegram.helpers import escape_markdown
 
@@ -178,19 +179,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     # Сбрасываем предыдущие выборы пользователя
     context.user_data.clear()
-    context.user_data['selected_genres'] = []
+    context.user_data['selected_genres'] = [] # Теперь будет хранить только один жанр
     context.user_data['selected_years'] = []
 
     keyboard = []
     for genre_name in FILM_GENRES.keys():
         keyboard.append([InlineKeyboardButton(genre_name, callback_data=f"genre_{genre_name}")])
-    keyboard.append([InlineKeyboardButton("Подтвердить выбор жанров", callback_data="confirm_genres")])
+    # Кнопка "Подтвердить выбор жанров" удалена
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     await update.message.reply_html(
         f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-        "Пожалуйста, выберите от 1 до 3 жанров:"
+        "Пожалуйста, выберите один жанр:"
     , reply_markup=reply_markup)
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
     return SELECT_GENRES
@@ -202,47 +203,10 @@ async def select_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     if query.data.startswith("genre_"):
         genre = query.data.replace("genre_", "")
-        selected_genres = context.user_data.get('selected_genres', [])
+        context.user_data['selected_genres'] = [genre] # Теперь всегда один жанр
+        logger.info(f"Пользователь {user_id} выбрал жанр: {genre}. Текущие жанры: {context.user_data['selected_genres']}")
 
-        if genre in selected_genres:
-            selected_genres.remove(genre)
-            message_text = f"Жанр '{genre}' удален. "
-        else:
-            if len(selected_genres) < 3:
-                selected_genres.append(genre)
-                message_text = f"Жанр '{genre}' добавлен. "
-            else:
-                await query.answer("Вы можете выбрать не более 3 жанров.", show_alert=True)
-                message_text = "Выбрано 3 жанра. "
-
-        context.user_data['selected_genres'] = selected_genres
-        logger.info(f"Пользователь {user_id} выбрал жанр: {genre}. Текущие жанры: {selected_genres}")
-
-        # Обновляем клавиатуру, чтобы показать выбранные/невыбранные жанры
-        keyboard = []
-        for g_name in FILM_GENRES.keys():
-            emoji = "✅ " if g_name in selected_genres else ""
-            keyboard.append([InlineKeyboardButton(f"{emoji}{g_name}", callback_data=f"genre_{g_name}")])
-        keyboard.append([InlineKeyboardButton("Подтвердить выбор жанров", callback_data="confirm_genres")])
-        
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            f"Выберите от 1 до 3 жанров:\n"
-            f"Выбрано: {', '.join(selected_genres) if selected_genres else 'ничего'}\n"
-            f"{message_text}",
-            reply_markup=reply_markup
-        )
-        return SELECT_GENRES
-
-    elif query.data == "confirm_genres":
-        selected_genres = context.user_data.get('selected_genres', [])
-        if not selected_genres:
-            await query.answer("Пожалуйста, выберите хотя бы один жанр.", show_alert=True)
-            return SELECT_GENRES
-        
-        context.user_data['selected_genres'] = selected_genres
-        logger.info(f"Пользователь {user_id} подтвердил выбор жанров: {selected_genres}")
-
+        # Сразу переходим к выбору годов
         keyboard = []
         for year_range_name in FILM_YEAR_RANGES.keys():
             keyboard.append([InlineKeyboardButton(year_range_name, callback_data=f"year_{year_range_name}")])
@@ -250,12 +214,24 @@ async def select_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         keyboard.append([InlineKeyboardButton("⬅️ Назад к жанрам", callback_data="back_to_genres")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            "Отлично! Теперь выберите года выпуска (можно выбрать несколько):",
-            reply_markup=reply_markup
-        )
-        return SELECT_YEARS
+        try:
+            await query.edit_message_text(
+                f"Отлично! Вы выбрали жанр: *{genre}*\n\n" # Указываем выбранный жанр
+                "Теперь выберите года выпуска (можно выбрать несколько):",
+                parse_mode='Markdown', # Включаем Markdown для выделения
+                reply_markup=reply_markup
+            )
+        except BadRequest as e:
+            logger.warning(f"Ошибка при редактировании сообщения в select_genres: {e}. Возможно, сообщение уже изменено или устарело.")
+            await query.message.reply_text(
+                f"Отлично! Вы выбрали жанр: *{genre}*\n\n"
+                "Теперь выберите года выпуска (можно выбрать несколько):",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        return SELECT_YEARS # Переходим к следующему состоянию
 
+    # Если вдруг пришел какой-то другой колбэк, который не начинается с "genre_"
     return SELECT_GENRES
 
 
@@ -287,12 +263,21 @@ async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         keyboard.append([InlineKeyboardButton("⬅️ Назад к жанрам", callback_data="back_to_genres")])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(
-            f"Выберите года выпуска (можно выбрать несколько):\n"
-            f"Выбрано: {', '.join(selected_years) if selected_years else 'ничего'}\n"
-            f"{message_text}",
-            reply_markup=reply_markup
-        )
+        try:
+            await query.edit_message_text(
+                f"Выберите года выпуска (можно выбрать несколько):\n"
+                f"Выбрано: {', '.join(selected_years) if selected_years else 'ничего'}\n"
+                f"{message_text}",
+                reply_markup=reply_markup
+            )
+        except BadRequest as e:
+            logger.warning(f"Ошибка при редактировании сообщения в select_years (year_): {e}. Возможно, сообщение уже изменено или устарело.")
+            await query.message.reply_text(
+                f"Выберите года выпуска (можно выбрать несколько):\n"
+                f"Выбрано: {', '.join(selected_years) if selected_years else 'ничего'}\n"
+                f"{message_text}",
+                reply_markup=reply_markup
+            )
         return SELECT_YEARS
 
     elif query.data == "confirm_years":
@@ -307,10 +292,17 @@ async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         keyboard = [[InlineKeyboardButton("⬅️ Назад к годам", callback_data="back_to_years")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
 
-        await query.edit_message_text(
-            "Наконец, введите ключевые слова, название фильма или описание того, что вы ищете (например, 'французский фильм про космос', 'комедия с Джимом Керри', 'научная фантастика с неожиданным концом'):",
-            reply_markup=reply_markup
-        )
+        try:
+            await query.edit_message_text(
+                "Наконец, введите ключевые слова, название фильма или описание того, что вы ищете (например, 'французский фильм про космос', 'комедия с Джимом Керри', 'научная фантастика с неожиданным концом'):",
+                reply_markup=reply_markup
+            )
+        except BadRequest as e:
+            logger.warning(f"Ошибка при редактировании сообщения в select_years (confirm_years): {e}. Возможно, сообщение уже изменено или устарело.")
+            await query.message.reply_text(
+                "Наконец, введите ключевые слова, название фильма или описание того, что вы ищете (например, 'французский фильм про космос', 'комедия с Джимом Керри', 'научная фантастика с неожиданным концом'):",
+                reply_markup=reply_markup
+            )
         return ENTER_KEYWORDS
 
     return SELECT_YEARS
@@ -408,18 +400,27 @@ async def back_to_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     context.user_data['selected_years'] = []
 
     keyboard = []
-    selected_genres = context.user_data.get('selected_genres', [])
+    # Теперь нет "Подтвердить выбор жанров"
+    # selected_genres = context.user_data.get('selected_genres', []) # Не используем для отображения галочки, т.к. жанр только один и он уже выбран
     for genre_name in FILM_GENRES.keys():
-        emoji = "✅ " if genre_name in selected_genres else ""
+        # Если нужно показать "выбранный" жанр после возвращения
+        is_selected = context.user_data.get('selected_genres') and context.user_data['selected_genres'][0] == genre_name
+        emoji = "✅ " if is_selected else ""
         keyboard.append([InlineKeyboardButton(f"{emoji}{genre_name}", callback_data=f"genre_{genre_name}")])
-    keyboard.append([InlineKeyboardButton("Подтвердить выбор жанров", callback_data="confirm_genres")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(
-        f"Выберите от 1 до 3 жанров:\n"
-        f"Выбрано: {', '.join(selected_genres) if selected_genres else 'ничего'}",
-        reply_markup=reply_markup
-    )
+    try:
+        await query.edit_message_text(
+            f"Пожалуйста, выберите один жанр:"
+            # f"Выбрано: {', '.join(selected_genres) if selected_genres else 'ничего'}", # Эта строка не нужна
+            , reply_markup=reply_markup
+        )
+    except BadRequest as e:
+        logger.warning(f"Ошибка при редактировании сообщения в back_to_genres: {e}. Возможно, сообщение уже изменено или устарело.")
+        await query.message.reply_text(
+            f"Пожалуйста, выберите один жанр:"
+            , reply_markup=reply_markup
+        )
     logger.info(f"Пользователь {query.from_user.id} вернулся к выбору жанров.")
     return SELECT_GENRES
 
@@ -440,11 +441,19 @@ async def back_to_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     keyboard.append([InlineKeyboardButton("⬅️ Назад к жанрам", callback_data="back_to_genres")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(
-        f"Выберите года выпуска (можно выбрать несколько):\n"
-        f"Выбрано: {', '.join(selected_years) if selected_years else 'ничего'}",
-        reply_markup=reply_markup
-    )
+    try:
+        await query.edit_message_text(
+            f"Выберите года выпуска (можно выбрать несколько):\n"
+            f"Выбрано: {', '.join(selected_years) if selected_years else 'ничего'}",
+            reply_markup=reply_markup
+        )
+    except BadRequest as e:
+        logger.warning(f"Ошибка при редактировании сообщения в back_to_years: {e}. Возможно, сообщение уже изменено или устарело.")
+        await query.message.reply_text(
+            f"Выберите года выпуска (можно выбрать несколько):\n"
+            f"Выбрано: {', '.join(selected_years) if selected_years else 'ничего'}",
+            reply_markup=reply_markup
+        )
     logger.info(f"Пользователь {query.from_user.id} вернулся к выбору годов.")
     return SELECT_YEARS
 
@@ -460,8 +469,7 @@ def main() -> None:
         entry_points=[CommandHandler("start", start)],
         states={
             SELECT_GENRES: [
-                CallbackQueryHandler(select_genres, pattern=r"^(genre_|confirm_genres)$"),
-                CallbackQueryHandler(back_to_genres, pattern="^back_to_genres$")
+                CallbackQueryHandler(select_genres, pattern=r"^genre_") # Изменено для обработки только выбора жанра
             ],
             SELECT_YEARS: [
                 CallbackQueryHandler(select_years, pattern=r"^(year_|confirm_years)$"),
