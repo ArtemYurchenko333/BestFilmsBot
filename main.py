@@ -29,7 +29,8 @@ if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY or not DATABASE_URL:
 
 # --- Настройка Gemini ---
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel('models/gemini-1.5-flash')
+# model = genai.GenerativeModel('models/gemini-1.5-flash')
+model = genai.GenerativeModel('models/gemini-2.0-flash')
 
 # --- Справочники ---
 FILM_GENRES = {
