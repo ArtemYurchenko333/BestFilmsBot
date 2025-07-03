@@ -77,7 +77,7 @@ def create_tables_if_not_exists(): #
         try:
             cursor = conn.cursor()
             cursor.execute("""
-                CREATE TABLE IF NOT EXISTS users (
+                CREATE TABLE IF NOT EXISTS users2 (
                     id BIGINT PRIMARY KEY,
                     telegram_username VARCHAR(255),
                     first_name VARCHAR(255),
@@ -104,11 +104,11 @@ def create_tables_if_not_exists(): #
                     keywords TEXT,
                     gemini_response TEXT NOT NULL,
                     requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(id)
+                    FOREIGN KEY (user_id) REFERENCES users2(id)
                 );
             """) # [cite: 29, 30, 31]
             conn.commit()
-            logger.info("Таблицы users и films проверены/созданы.")
+            logger.info("Таблицы users2 и films проверены/созданы.")
         except Exception as e:
             logger.error(f"Ошибка при создании таблиц: {e}")
         finally:
@@ -121,12 +121,12 @@ async def save_user_data(user_id: int, username: str, first_name: str, last_name
         try:
             cursor = conn.cursor()
             # Проверяем, существует ли пользователь
-            cursor.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+            cursor.execute("SELECT id FROM users2 WHERE id = %s", (user_id,))
             if cursor.fetchone() is None:
                 # Если пользователя нет, вставляем нового
                 cursor.execute(
                     """
-                    INSERT INTO users (id, telegram_username, first_name, last_name)
+                    INSERT INTO users2 (id, telegram_username, first_name, last_name)
                     VALUES (%s, %s, %s, %s);
                     """,
                     (user_id, username, first_name, last_name)
