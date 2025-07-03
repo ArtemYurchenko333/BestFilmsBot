@@ -5,7 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from telegram.error import BadRequest, TimedOut
+from telegram.error import BadRequest, TimedOut # Убедитесь, что TimedOut импортирован
 import google.generativeai as genai
 from telegram.helpers import escape_markdown
 import re
@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 SELECT_GENRES, SELECT_YEARS, ENTER_KEYWORDS = range(3)
 
 # --- Переменные окружения ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN3")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY3")
-DATABASE_URL = os.getenv("DATABASE_URL3")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Проверка наличия всех необходимых переменных окружения
 if not TELEGRAM_BOT_TOKEN:
