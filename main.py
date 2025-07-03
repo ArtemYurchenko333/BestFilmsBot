@@ -498,7 +498,7 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CallbackQueryHandler(start, pattern="^start_over$"), # Это нужно было переместить сюда
+            CallbackQueryHandler(start, pattern="^start_over$"), # Эту строку нужно переместить сюда
             MessageHandler(filters.COMMAND | filters.TEXT, unknown)
         ],
     )
