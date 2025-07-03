@@ -20,9 +20,9 @@ logger = logging.getLogger(__name__)
 SELECT_GENRES, SELECT_YEARS, ENTER_KEYWORDS = range(3)
 
 # --- Переменные окружения ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-DATABASE_URL = os.getenv("DATABASE_URL")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN3")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY3")
+DATABASE_URL = os.getenv("DATABASE_UR3L")
 
 # Проверка наличия всех необходимых переменных окружения
 if not TELEGRAM_BOT_TOKEN:
