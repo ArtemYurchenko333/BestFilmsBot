@@ -8,7 +8,7 @@ from telegram.ext import (
 from telegram.error import BadRequest
 import google.generativeai as genai
 from telegram.helpers import escape_markdown
-import re # Импортируем модуль для регулярных выражений
+import re
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -233,6 +233,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "Пожалуйста, выберите один жанр:"
             , reply_markup=reply_markup)
     elif update.callback_query:
+        # Если вызов пришел от callback_query, используем message из callback_query
+        # Перед отправкой нового сообщения, можно попробовать удалить или отредактировать старое
+        try:
+            await update.callback_query.message.edit_reply_markup(reply_markup=None) # Удалить предыдущие кнопки
+        except BadRequest as e:
+            logger.warning(f"Не удалось удалить предыдущие кнопки: {e}")
+        
         await update.callback_query.message.reply_html(
             f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
             "Пожалуйста, выберите один жанр:"
@@ -498,7 +505,7 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CallbackQueryHandler(start, pattern="^start_over$"), # Эту строку нужно переместить сюда
+            CallbackQueryHandler(start, pattern="^start_over$"), # Эту строку нужно переместить сюда!
             MessageHandler(filters.COMMAND | filters.TEXT, unknown)
         ],
     )
