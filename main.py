@@ -226,24 +226,41 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # В зависимости от того, откуда пришел вызов (команда или кнопка)
-    if update.message:
-        await update.message.reply_html(
-            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-            "Пожалуйста, выберите один жанр:"
-            , reply_markup=reply_markup)
-    elif update.callback_query:
-        # Если вызов пришел от callback_query, используем message из callback_query
-        try:
-            # Попытаемся отредактировать сообщение с кнопкой "Начать новый поиск", убрав кнопки
+    # Используем update.effective_message, который всегда будет содержать объект Message
+    # независимо от того, является ли обновление текстовым сообщением или callback_query.
+    try:
+        # Если это callback_query, и мы не в начале диалога (т.е. уже было сообщение с кнопкой "Начать новый поиск"),
+        # пытаемся удалить предыдущие кнопки, чтобы избежать дублирования.
+        if update.callback_query and update.callback_query.message:
             await update.callback_query.message.edit_reply_markup(reply_markup=None) 
-        except BadRequest as e:
-            logger.warning(f"Не удалось удалить предыдущие кнопки: {e}")
-        
-        await update.callback_query.message.reply_html(
+            # Затем отвечаем на callback_query, чтобы убрать "часики" на кнопке
+            await update.callback_query.answer("Начинаем новый поиск...")
+
+        await update.effective_message.reply_html( # <-- Ключевое изменение здесь
             f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
             "Пожалуйста, выберите один жанр:"
             , reply_markup=reply_markup)
+    except BadRequest as e:
+        logger.warning(f"Ошибка при отправке сообщения в start: {e}. Возможно, сообщение уже изменено или устарело, или произошла другая ошибка API.")
+        # Если произошла BadRequest (например, сообщение уже изменено или удалено),
+        # то попробуем просто отправить новое сообщение.
+        try:
+            if update.message:
+                await update.message.reply_html(
+                    f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+                    "Пожалуйста, выберите один жанр:"
+                    , reply_markup=reply_markup)
+            elif update.callback_query and update.callback_query.message:
+                 await update.callback_query.message.reply_html(
+                    f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+                    "Пожалуйста, выберите один жанр:"
+                    , reply_markup=reply_markup)
+            else:
+                logger.error("Не удалось отправить стартовое сообщение: нет доступного сообщения или callback_query.")
+        except Exception as inner_e:
+            logger.error(f"Критическая ошибка при попытке отправить резервное сообщение в start: {inner_e}")
+
+
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
     return SELECT_GENRES
 
@@ -505,7 +522,7 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CallbackQueryHandler(start, pattern="^start_over$"), # Эту строку теперь обрабатывает ConversationHandler
+            CallbackQueryHandler(start, pattern="^start_over$"), # Теперь эта строка в fallbacks
             MessageHandler(filters.COMMAND | filters.TEXT, unknown)
         ],
     )
