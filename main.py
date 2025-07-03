@@ -226,39 +226,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # Используем update.effective_message, который всегда будет содержать объект Message
-    # независимо от того, является ли обновление текстовым сообщением или callback_query.
     try:
-        # Если это callback_query, и мы не в начале диалога (т.е. уже было сообщение с кнопкой "Начать новый поиск"),
-        # пытаемся удалить предыдущие кнопки, чтобы избежать дублирования.
-        if update.callback_query and update.callback_query.message:
-            await update.callback_query.message.edit_reply_markup(reply_markup=None) 
-            # Затем отвечаем на callback_query, чтобы убрать "часики" на кнопке
+        # Если это callback_query (т.е. нажата кнопка "Начать новый поиск")
+        if update.callback_query:
+            # Отвечаем на callback_query, чтобы убрать "часики" с кнопки
             await update.callback_query.answer("Начинаем новый поиск...")
-
-        await update.effective_message.reply_html( # <-- Ключевое изменение здесь
+            
+            # Попытаемся отредактировать исходное сообщение, чтобы убрать кнопки
+            # Это предотвратит появление нескольких кнопок "Начать новый поиск"
+            try:
+                await update.callback_query.message.edit_reply_markup(reply_markup=None)
+            except BadRequest as e:
+                logger.warning(f"Не удалось отредактировать reply_markup в start для callback_query: {e}")
+                # Если не удалось отредактировать, это не критично, просто логгируем.
+        
+        # Отправляем новое сообщение с жанрами, используя effective_message
+        await update.effective_message.reply_html(
             f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
             "Пожалуйста, выберите один жанр:"
             , reply_markup=reply_markup)
-    except BadRequest as e:
-        logger.warning(f"Ошибка при отправке сообщения в start: {e}. Возможно, сообщение уже изменено или устарело, или произошла другая ошибка API.")
-        # Если произошла BadRequest (например, сообщение уже изменено или удалено),
-        # то попробуем просто отправить новое сообщение.
-        try:
-            if update.message:
-                await update.message.reply_html(
-                    f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-                    "Пожалуйста, выберите один жанр:"
-                    , reply_markup=reply_markup)
-            elif update.callback_query and update.callback_query.message:
-                 await update.callback_query.message.reply_html(
-                    f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-                    "Пожалуйста, выберите один жанр:"
-                    , reply_markup=reply_markup)
-            else:
-                logger.error("Не удалось отправить стартовое сообщение: нет доступного сообщения или callback_query.")
-        except Exception as inner_e:
-            logger.error(f"Критическая ошибка при попытке отправить резервное сообщение в start: {inner_e}")
+    except Exception as e:
+        logger.error(f"Критическая ошибка при отправке стартового сообщения в start: {e}")
+        # В случае критической ошибки, попробуем отправить просто текстовое сообщение
+        # Или пропустить отправку, если совсем ничего не работает.
+        if update.message:
+            await update.message.reply_text("Извините, произошла ошибка. Пожалуйста, попробуйте команду /start еще раз.")
+        elif update.callback_query and update.callback_query.message:
+            await update.callback_query.message.reply_text("Извините, произошла ошибка. Пожалуйста, попробуйте команду /start еще раз.")
 
 
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
@@ -501,7 +495,7 @@ async def back_to_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 # --- Основная функция для запуска бота ---
 def main() -> None:
     """Запускает бота."""
-    create_tables_if_not_exists()
+    create_tables_if_not_exists() # Убедимся, что таблицы созданы
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
@@ -522,13 +516,14 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CallbackQueryHandler(start, pattern="^start_over$"), # Теперь эта строка в fallbacks
+            # CallbackQueryHandler(start, pattern="^start_over$"), # Убрано из fallbacks
             MessageHandler(filters.COMMAND | filters.TEXT, unknown)
         ],
     )
 
     application.add_handler(conv_handler)
-    # application.add_handler(CallbackQueryHandler(start, pattern="^start_over$")) # Эту строчку удаляем, так как она дублируется в fallbacks
+    # Отдельный обработчик для кнопки "Начать новый поиск", чтобы он работал независимо от текущего состояния разговора
+    application.add_handler(CallbackQueryHandler(start, pattern="^start_over$"))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     logger.info("Бот запущен. Ожидание сообщений...")
