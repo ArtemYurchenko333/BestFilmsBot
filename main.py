@@ -226,10 +226,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_html(
-        f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-        "Пожалуйста, выберите один жанр:"
-    , reply_markup=reply_markup)
+    # В зависимости от того, откуда пришел вызов (команда или кнопка)
+    if update.message:
+        await update.message.reply_html(
+            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+            "Пожалуйста, выберите один жанр:"
+            , reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.message.reply_html(
+            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+            "Пожалуйста, выберите один жанр:"
+            , reply_markup=reply_markup)
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
     return SELECT_GENRES
 
@@ -489,11 +496,15 @@ def main() -> None:
                 CallbackQueryHandler(back_to_years, pattern="^back_to_years$")
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND | filters.TEXT, unknown)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(start, pattern="^start_over$"), # Это нужно было переместить сюда
+            MessageHandler(filters.COMMAND | filters.TEXT, unknown)
+        ],
     )
 
     application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(start, pattern="^start_over$"))
+    # application.add_handler(CallbackQueryHandler(start, pattern="^start_over$")) # Эту строчку нужно удалить или закомментировать
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     logger.info("Бот запущен. Ожидание сообщений...")
