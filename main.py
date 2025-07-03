@@ -5,7 +5,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 )
-from telegram.error import BadRequest
+from telegram.error import BadRequest, TimedOut
 import google.generativeai as genai
 from telegram.helpers import escape_markdown
 import re
@@ -184,20 +184,16 @@ def extract_film_names(gemini_response_text: str) -> list:
     """
     film_names = [None, None, None]
     
-    # Регулярное выражение для поиска строк, начинающихся с номера и точки (1., 2., 3.)
-    # Затем извлекаем текст до первого двоеточия или конца строки.
     pattern = r'^\s*(\d+)\.\s*(?:Название фильма:\s*)?([^:.]+)'
     matches = re.findall(pattern, gemini_response_text, re.MULTILINE)
 
     for num_str, name_candidate in matches:
         num = int(num_str)
         if 1 <= num <= 3:
-            # Очищаем название от лишних пробелов, точек и запятых в конце
             cleaned_name = re.sub(r'[,.]\s*$', '', name_candidate).strip()
             film_names[num - 1] = cleaned_name
             logger.info(f"Парсинг: найден фильм {num}: '{cleaned_name}'")
     
-    # Заполняем None, если фильмов меньше 3х
     while len(film_names) < 3:
         film_names.append(None)
 
@@ -211,7 +207,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     await save_user_data(user.id, user.username, user.first_name, user.last_name)
 
-    # Сбрасываем предыдущие выборы пользователя
     context.user_data.clear()
     context.user_data['selected_genres'] = []
     context.user_data['selected_years'] = []
@@ -223,31 +218,35 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     reply_markup = InlineKeyboardMarkup(keyboard)
 
     try:
-        # Проверяем, является ли обновление результатом нажатия на инлайн-кнопку
+        # Если это callback_query (т.е. нажата кнопка "Начать новый поиск")
         if update.callback_query:
-            await update.callback_query.answer("Начинаем новый поиск...") # Отвечаем на callback_query, чтобы убрать "часики"
-            # Пытаемся удалить кнопки из предыдущего сообщения, чтобы избежать дублирования
+            # Отвечаем на callback_query, чтобы убрать "часики" с кнопки
+            await update.callback_query.answer("Начинаем новый поиск...")
+            
+            # Попытаемся отредактировать исходное сообщение, чтобы убрать кнопки
             try:
                 await update.callback_query.message.edit_reply_markup(reply_markup=None)
             except BadRequest as e:
-                logger.warning(f"Не удалось отредактировать reply_markup в start (callback_query): {e}")
+                logger.warning(f"Не удалось отредактировать reply_markup в start для callback_query: {e}")
+            except Exception as e:
+                logger.error(f"Непредвиденная ошибка при редактировании reply_markup: {e}")
             
-            # Отправляем новое сообщение в чат
+            # Отправляем новое сообщение в тот же чат
             await update.callback_query.message.reply_html(
                 f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
                 "Пожалуйста, выберите один жанр:"
                 , reply_markup=reply_markup
             )
-        elif update.message: # Это обычное текстовое сообщение (например, команда /start)
-            await update.message.reply_html( # [cite: 28]
+        # Если это текстовое сообщение (например, команда /start)
+        elif update.message:
+            await update.message.reply_html(
                 f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
                 "Пожалуйста, выберите один жанр:"
                 , reply_markup=reply_markup
             )
         else:
             logger.error("Функция start вызвана без update.message или update.callback_query.")
-            # Если ни message, ни callback_query нет, логируем ошибку и пытаемся отправить сообщение
-            # через effective_chat, если он доступен. Это маловероятный сценарий, но для надежности.
+            # Если ни message, ни callback_query нет, пытаемся отправить сообщение через effective_chat
             if update.effective_chat:
                 await update.effective_chat.send_message(
                     f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
@@ -257,9 +256,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     except BadRequest as e:
         logger.error(f"Ошибка BadRequest при отправке стартового сообщения в start: {e}")
-        # Если произошла ошибка BadRequest (например, сообщение уже изменено или удалено),
-        # то попробуем просто отправить новое сообщение.
-        # Это может быть избыточно, но помогает в нестандартных ситуациях.
+        # В случае BadRequest, попробуем отправить просто новое сообщение, если возможно.
         if update.effective_chat:
             await update.effective_chat.send_message(
                 f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
@@ -267,11 +264,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
                 , reply_markup=reply_markup, parse_mode='HTML'
             )
     except Exception as e:
-        logger.error(f"Непредвиденная ошибка в start: {e}")
+        logger.error(f"Непредвиденная ошибка при отправке стартового сообщения в start: {e}")
         if update.effective_chat:
-            await update.effective_chat.send_message(
-                "Извините, произошла непредвиденная ошибка. Пожалуйста, попробуйте команду /start еще раз."
-            )
+            await update.effective_chat.send_message("Извините, произошла непредвиденная ошибка. Пожалуйста, попробуйте команду /start еще раз.")
+
 
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
     return SELECT_GENRES
@@ -284,9 +280,8 @@ async def select_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     if query.data.startswith("genre_"):
         genre = query.data.replace("genre_", "")
         context.user_data['selected_genres'] = [genre]
-        logger.info(f"Пользователь {user_id} выбрал жанр: {genre}. Текущие жанры: {context.user_data['selected_genres']}") # [cite: 29]
+        logger.info(f"Пользователь {user_id} выбрал жанр: {genre}. Текущие жанры: {context.user_data['selected_genres']}")
 
-        # Сразу переходим к выбору годов
         keyboard = []
         for year_range_name in FILM_YEAR_RANGES.keys():
             keyboard.append([InlineKeyboardButton(year_range_name, callback_data=f"year_{year_range_name}")])
@@ -294,14 +289,15 @@ async def select_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
+            # Попытаемся отредактировать сообщение
             await query.edit_message_text(
-                f"Отлично! Вы выбрали жанр: *{genre}*\n\n" # [cite: 30, 31]
+                f"Отлично! Вы выбрали жанр: *{genre}*\n\n"
                 "Теперь выберите один диапазон годов выпуска:",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
         except BadRequest as e:
-            logger.warning(f"Ошибка при редактировании сообщения в select_genres: {e}. Возможно, сообщение уже изменено или устарело.") # [cite: 32]
+            logger.warning(f"Ошибка при редактировании сообщения в select_genres: {e}. Возможно, сообщение уже изменено, устарело, или текст не изменился.")
             # Если не удалось отредактировать, отправляем новое сообщение
             await query.message.reply_text(
                 f"Отлично! Вы выбрали жанр: *{genre}*\n\n"
@@ -309,6 +305,17 @@ async def select_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
+        except TimedOut as e:
+            logger.error(f"Timeout при редактировании сообщения в select_genres: {e}")
+            await query.message.reply_text(
+                f"Извините, произошла задержка. Вы выбрали жанр: *{genre}*\n\n"
+                "Теперь выберите один диапазон годов выпуска:",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Непредвиденная ошибка в select_genres: {e}")
+            await query.message.reply_text("Извините, произошла ошибка. Пожалуйста, попробуйте еще раз.")
         return SELECT_YEARS
 
     return SELECT_GENRES
@@ -322,32 +329,44 @@ async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     if query.data.startswith("year_"):
         year_range_name = query.data.replace("year_", "")
         context.user_data['selected_years'] = [year_range_name]
-        logger.info(f"Пользователь {user_id} выбрал года: {year_range_name}. Текущие года: {context.user_data['selected_years']}") # [cite: 34]
+        logger.info(f"Пользователь {user_id} выбрал года: {year_range_name}. Текущие года: {context.user_data['selected_years']}")
 
-        # Сразу переходим к вводу ключевых слов
         selected_genre = context.user_data['selected_genres'][0] if context.user_data['selected_genres'] else "не выбран"
 
         keyboard = [[InlineKeyboardButton("⬅️ Назад к годам", callback_data="back_to_years")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         try:
             await query.edit_message_text(
-                f"Вы выбрали:\n" # [cite: 35]
+                f"Вы выбрали:\n"
                 f"Жанр: *{selected_genre}*\n"
                 f"Года: *{year_range_name}*\n\n"
                 "Наконец, введите ключевые слова, название фильма или описание того, что вы ищете (например, 'французский фильм про космос', 'комедия с Джимом Керри', 'научная фантастика с неожиданным концом'):",
                 parse_mode='Markdown',
-                reply_markup=reply_markup # [cite: 36]
+                reply_markup=reply_markup
             )
         except BadRequest as e:
-            logger.warning(f"Ошибка при редактировании сообщения в select_years: {e}. Возможно, сообщение уже изменено или устарело.") # [cite: 37]
+            logger.warning(f"Ошибка при редактировании сообщения в select_years: {e}. Возможно, сообщение уже изменено, устарело, или текст не изменился.")
             await query.message.reply_text(
                 f"Вы выбрали:\n"
                 f"Жанр: *{selected_genre}*\n"
                 f"Года: *{year_range_name}*\n\n"
-                "Наконец, введите ключевые слова, название фильма или описание того, что вы ищете (например, 'французский фильм про космос', 'комедия с Джимом Керри', 'научная фантафика с неожиданным концом'):", # [cite: 38]
+                "Наконец, введите ключевые слова, название фильма или описание того, что вы ищете (например, 'французский фильм про космос', 'комедия с Джимом Керри', 'научная фантафика с неожиданным концом'):",
                 parse_mode='Markdown',
                 reply_markup=reply_markup
             )
+        except TimedOut as e:
+            logger.error(f"Timeout при редактировании сообщения в select_years: {e}")
+            await query.message.reply_text(
+                f"Извините, произошла задержка. Вы выбрали:\n"
+                f"Жанр: *{selected_genre}*\n"
+                f"Года: *{year_range_name}*\n\n"
+                "Теперь введите ключевые слова для поиска:",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        except Exception as e:
+            logger.error(f"Непредвиденная ошибка в select_years: {e}")
+            await query.message.reply_text("Извините, произошла ошибка. Пожалуйста, попробуйте еще раз.")
         return ENTER_KEYWORDS
 
     return SELECT_YEARS
@@ -358,25 +377,24 @@ async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     user_id = user.id
     keywords = update.message.text
     context.user_data['keywords'] = keywords
-    logger.info(f"Пользователь {user_id} ввел ключевые слова: '{keywords}'") # [cite: 39]
+    logger.info(f"Пользователь {user_id} ввел ключевые слова: '{keywords}'")
 
     selected_genres = context.user_data.get('selected_genres', [])
     selected_years = context.user_data.get('selected_years', [])
 
     if not selected_genres or not selected_years:
-        await update.message.reply_text("Что-то пошло не так. Пожалуйста, начните сначала с /start.") # [cite: 40]
+        await update.message.reply_text("Что-то пошло не так. Пожалуйста, начните сначала с /start.")
         return ConversationHandler.END
 
     await update.message.reply_text("Отлично! Ищу лучшие фильмы по вашему запросу. Это может занять немного времени...")
 
-    # Формируем промпт для Gemini
     genres_str = ", ".join(selected_genres)
     years_str = ", ".join([FILM_YEAR_RANGES[yr] for yr in selected_years])
 
     prompt_text = (
         f"Предложи ТОП-3 лучших фильма в жанрах: {genres_str}, "
         f"выпущенных в годах: {years_str}. "
-        f"Ориентируйся на следующие ключевые слова/описание: '{keywords}'. " # [cite: 41]
+        f"Ориентируйся на следующие ключевые слова/описание: '{keywords}'. "
         "Для каждого фильма укажи: Название, Год выпуска, Жанр(ы), Краткое описание (1-2 предложения). "
         "Форматируй ответ как нумерованный список, например:\n"
         "1. Название фильма 1: Год, Жанр. Краткое описание.\n"
@@ -385,49 +403,46 @@ async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "Только лучшие фильмы по этому запросу."
     )
 
-    gemini_response_text = "" # [cite: 42]
-    film_names = [None, None, None] # Для хранения извлеченных названий фильмов
+    gemini_response_text = ""
+    film_names = [None, None, None]
     try:
         response = model.generate_content(
             prompt_text,
             safety_settings=[
                 {"category": "HARM_CATEGORY_HARASSMENT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_HATE_SPEECH", "threshold": "BLOCK_NONE"},
-                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}, # [cite: 43]
+                {"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"},
                 {"category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"},
             ]
         )
         gemini_response_text = response.text
         await update.message.reply_text(gemini_response_text)
 
-        # --- НОВЫЙ ШАГ: Парсинг названий фильмов ---
         film_names = extract_film_names(gemini_response_text)
         
-        # Сохраняем данные в базу данных
         await save_film_request(
             user_id=user.id,
             genres=genres_str,
             years=years_str,
             keywords=keywords,
             gemini_response=gemini_response_text,
-            film1_name=film_names[0], # [cite: 45]
+            film1_name=film_names[0],
             film2_name=film_names[1],
             film3_name=film_names[2],
             username=user.username,
             first_name=user.first_name,
             last_name=user.last_name,
             country=context.user_data.get('user_country', ''),
-            city=context.user_data.get('user_city', ''),     # [cite: 46]
+            city=context.user_data.get('user_city', ''),
             phone_number=context.user_data.get('user_phone_number', '')
         )
 
     except Exception as e:
         logger.error(f"Ошибка при обращении к Gemini API или обработке ответа: {e}")
         await update.message.reply_text(
-            "Извини, произошла ошибка при получении информации о фильмах. Попробуй еще раз позже." # [cite: 47]
+            "Извини, произошла ошибка при получении информации о фильмах. Попробуй еще раз позже."
         )
 
-    # Предлагаем начать заново
     keyboard = [[InlineKeyboardButton("Начать новый поиск", callback_data="start_over")]]
     reply_markup = InlineKeyboardMarkup(keyboard)
     await update.message.reply_text("Надеюсь, вам что-то подойдет!", reply_markup=reply_markup)
@@ -435,34 +450,29 @@ async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     return ConversationHandler.END
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Отменяет и завершает текущий разговор."""
     user = update.effective_user
     logger.info(f"Пользователь {user.first_name} отменил разговор.")
     await update.message.reply_text(
-        'Поиск отменен. Если хочешь начать сначала, используй команду /start.' # [cite: 48]
+        'Поиск отменен. Если хочешь начать сначала, используй команду /start.'
     )
-    # Очищаем данные пользователя в контексте
     context.user_data.clear()
     return ConversationHandler.END
 
 async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ответ на неизвестные команды/сообщения."""
-    await update.message.reply_text("Извини, я не понял эту команду. Попробуй /start, чтобы начать поиск фильмов.") # [cite: 49]
+    await update.message.reply_text("Извини, я не понял эту команду. Попробуй /start, чтобы начать поиск фильмов.")
 
 
-# --- Обработчики кнопок "Назад" ---
 async def back_to_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
     await query.answer()
     
-    # Сбрасываем выбранные года, если пользователь возвращается к жанрам
     context.user_data['selected_years'] = []
 
     keyboard = []
     for genre_name in FILM_GENRES.keys():
         is_selected = context.user_data.get('selected_genres') and context.user_data['selected_genres'][0] == genre_name
         emoji = "✅ " if is_selected else ""
-        keyboard.append([InlineKeyboardButton(f"{emoji}{genre_name}", callback_data=f"genre_{genre_name}")]) # [cite: 50]
+        keyboard.append([InlineKeyboardButton(f"{emoji}{genre_name}", callback_data=f"genre_{genre_name}")])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
@@ -471,11 +481,20 @@ async def back_to_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             reply_markup=reply_markup
         )
     except BadRequest as e:
-        logger.warning(f"Ошибка при редактировании сообщения в back_to_genres: {e}. Возможно, сообщение уже изменено или устарело.") # [cite: 51]
+        logger.warning(f"Ошибка при редактировании сообщения в back_to_genres: {e}. Возможно, сообщение уже изменено, устарело, или текст не изменился.")
         await query.message.reply_text(
             f"Пожалуйста, выберите один жанр:",
             reply_markup=reply_markup
         )
+    except TimedOut as e:
+        logger.error(f"Timeout при редактировании сообщения в back_to_genres: {e}")
+        await query.message.reply_text(
+            "Извините, произошла задержка. Пожалуйста, выберите один жанр:"
+            , reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка в back_to_genres: {e}")
+        await query.message.reply_text("Извините, произошла ошибка. Пожалуйста, попробуйте еще раз.")
     logger.info(f"Пользователь {query.from_user.id} вернулся к выбору жанров.")
     return SELECT_GENRES
 
@@ -484,11 +503,9 @@ async def back_to_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     query = update.callback_query
     await query.answer()
 
-    # Сбрасываем ключевые слова, если пользователь возвращается к годам
     context.user_data['keywords'] = None
     
     keyboard = []
-    # Теперь выбран только один диапазон годов
     for year_range_name in FILM_YEAR_RANGES.keys():
         is_selected = context.user_data.get('selected_years') and context.user_data['selected_years'][0] == year_range_name
         emoji = "✅ " if is_selected else ""
@@ -498,15 +515,24 @@ async def back_to_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
         await query.edit_message_text(
-            f"Теперь выберите один диапазон годов выпуска:", # [cite: 53]
+            f"Теперь выберите один диапазон годов выпуска:",
             reply_markup=reply_markup
         )
     except BadRequest as e:
-        logger.warning(f"Ошибка при редактировании сообщения в back_to_years: {e}. Возможно, сообщение уже изменено или устарело.") # [cite: 54]
+        logger.warning(f"Ошибка при редактировании сообщения в back_to_years: {e}. Возможно, сообщение уже изменено, устарело, или текст не изменился.")
         await query.message.reply_text(
             f"Теперь выберите один диапазон годов выпуска:",
             reply_markup=reply_markup
         )
+    except TimedOut as e:
+        logger.error(f"Timeout при редактировании сообщения в back_to_years: {e}")
+        await query.message.reply_text(
+            "Извините, произошла задержка. Теперь выберите один диапазон годов выпуска:"
+            , reply_markup=reply_markup
+        )
+    except Exception as e:
+        logger.error(f"Непредвиденная ошибка в back_to_years: {e}")
+        await query.message.reply_text("Извините, произошла ошибка. Пожалуйста, попробуйте еще раз.")
     logger.info(f"Пользователь {query.from_user.id} вернулся к выбору годов.")
     return SELECT_YEARS
 
@@ -514,30 +540,29 @@ async def back_to_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 # --- Основная функция для запуска бота ---
 def main() -> None:
     """Запускает бота."""
-    create_tables_if_not_exists() # Убедимся, что таблицы созданы при запуске
+    create_tables_if_not_exists()
 
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)], # [cite: 55]
+        entry_points=[CommandHandler("start", start)],
         states={
             SELECT_GENRES: [
                 CallbackQueryHandler(select_genres, pattern=r"^genre_")
             ],
             SELECT_YEARS: [
                 CallbackQueryHandler(select_years, pattern=r"^year_"),
-                CallbackQueryHandler(back_to_genres, pattern="^back_to_genres$") # [cite: 56]
+                CallbackQueryHandler(back_to_genres, pattern="^back_to_genres$")
             ],
             ENTER_KEYWORDS: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keywords),
                 CallbackQueryHandler(back_to_years, pattern="^back_to_years$")
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND | filters.TEXT, unknown)], # [cite: 57]
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND | filters.TEXT, unknown)],
     )
 
     application.add_handler(conv_handler)
-    # Отдельный обработчик для кнопки "Начать новый поиск", чтобы он работал независимо от текущего состояния разговора
     application.add_handler(CallbackQueryHandler(start, pattern="^start_over$"))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
