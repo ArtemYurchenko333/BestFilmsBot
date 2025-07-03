@@ -8,7 +8,7 @@ from telegram.ext import (
 from telegram.error import BadRequest
 import google.generativeai as genai
 from telegram.helpers import escape_markdown
-import re
+import re # Импортируем модуль для регулярных выражений
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -226,17 +226,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    # В зависимости от того, откуда пришел вызов (команда или кнопка)
-    if update.message:
-        await update.message.reply_html(
-            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-            "Пожалуйста, выберите один жанр:"
-            , reply_markup=reply_markup)
-    elif update.callback_query:
-        await update.callback_query.message.reply_html(
-            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-            "Пожалуйста, выберите один жанр:"
-            , reply_markup=reply_markup)
+    await update.message.reply_html(
+        f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+        "Пожалуйста, выберите один жанр:"
+    , reply_markup=reply_markup)
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
     return SELECT_GENRES
 
@@ -312,6 +305,8 @@ async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
                 reply_markup=reply_markup
             )
         return ENTER_KEYWORDS
+
+    return SELECT_YEARS
 
 
 async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -494,15 +489,11 @@ def main() -> None:
                 CallbackQueryHandler(back_to_years, pattern="^back_to_years$")
             ],
         },
-        fallbacks=[
-            CommandHandler("cancel", cancel),
-            CallbackQueryHandler(start, pattern="^start_over$"), # Перемещено сюда
-            MessageHandler(filters.COMMAND | filters.TEXT, unknown)
-        ],
+        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND | filters.TEXT, unknown)],
     )
 
     application.add_handler(conv_handler)
-    # application.add_handler(CallbackQueryHandler(start, pattern="^start_over$")) # Эту строчку удаляем или комментируем
+    application.add_handler(CallbackQueryHandler(start, pattern="^start_over$"))
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     logger.info("Бот запущен. Ожидание сообщений...")
