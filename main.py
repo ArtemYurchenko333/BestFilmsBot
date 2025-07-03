@@ -234,23 +234,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             , reply_markup=reply_markup)
     elif update.callback_query:
         # Если вызов пришел от callback_query, используем message из callback_query
-        # Перед отправкой нового сообщения, можно попробовать удалить или отредактировать старое
         try:
             # Попытаемся отредактировать сообщение с кнопкой "Начать новый поиск", убрав кнопки
             await update.callback_query.message.edit_reply_markup(reply_markup=None) 
-            # Или отправить новое сообщение
-            await update.callback_query.message.reply_html(
-                f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-                "Пожалуйста, выберите один жанр:"
-                , reply_markup=reply_markup)
         except BadRequest as e:
-            logger.warning(f"Не удалось отредактировать или отправить новое сообщение в start для callback_query: {e}")
-            # В случае ошибки просто отправим новое сообщение, чтобы не блокировать пользователя
-            await update.callback_query.message.reply_html(
-                f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-                "Пожалуйста, выберите один жанр:"
-                , reply_markup=reply_markup)
-            
+            logger.warning(f"Не удалось удалить предыдущие кнопки: {e}")
+        
+        await update.callback_query.message.reply_html(
+            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+            "Пожалуйста, выберите один жанр:"
+            , reply_markup=reply_markup)
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
     return SELECT_GENRES
 
@@ -512,13 +505,13 @@ def main() -> None:
         },
         fallbacks=[
             CommandHandler("cancel", cancel),
-            CallbackQueryHandler(start, pattern="^start_over$"), # Эту строку нужно переместить сюда!
+            CallbackQueryHandler(start, pattern="^start_over$"), # Эту строку теперь обрабатывает ConversationHandler
             MessageHandler(filters.COMMAND | filters.TEXT, unknown)
         ],
     )
 
     application.add_handler(conv_handler)
-    # application.add_handler(CallbackQueryHandler(start, pattern="^start_over$")) # Эту строчку нужно удалить или закомментировать
+    # application.add_handler(CallbackQueryHandler(start, pattern="^start_over$")) # Эту строчку удаляем, так как она дублируется в fallbacks
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     logger.info("Бот запущен. Ожидание сообщений...")
