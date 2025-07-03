@@ -8,7 +8,7 @@ from telegram.ext import (
 from telegram.error import BadRequest
 import google.generativeai as genai
 from telegram.helpers import escape_markdown
-import re # Импортируем модуль для регулярных выражений
+import re
 
 # --- Настройка логирования ---
 logging.basicConfig(
@@ -147,9 +147,9 @@ async def save_user_data(user_id: int, username: str, first_name: str, last_name
                 conn.close()
 
 async def save_film_request(user_id: int, genres: str, years: str, keywords: str, gemini_response: str,
-                             film1_name: str = None, film2_name: str = None, film3_name: str = None,
-                             username: str = None, first_name: str = None, last_name: str = None,
-                             country: str = "", city: str = "", phone_number: str = ""):
+                            film1_name: str = None, film2_name: str = None, film3_name: str = None,
+                            username: str = None, first_name: str = None, last_name: str = None,
+                            country: str = "", city: str = "", phone_number: str = ""):
     conn = get_db_connection()
     if conn:
         try:
@@ -167,10 +167,10 @@ async def save_film_request(user_id: int, genres: str, years: str, keywords: str
                 )
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, DEFAULT, %s, %s);
                 """,
-                (user_id, username, first_name, last_name, country, # Эти 4 теперь в начале
+                (user_id, username, first_name, last_name, country,
                  genres, years, keywords, gemini_response,
-                 film1_name, film2_name, film3_name, # Названия фильмов
-                 city, phone_number) # Эти 2 теперь в самом конце
+                 film1_name, film2_name, film3_name,
+                 city, phone_number)
             )
             conn.commit()
             logger.info(f"Запрос на фильм для пользователя {user_id} успешно сохранен в БД с названиями фильмов.")
@@ -190,7 +190,6 @@ def extract_film_names(gemini_response_text: str) -> list:
     
     # Регулярное выражение для поиска строк, начинающихся с номера и точки (1., 2., 3.)
     # Затем извлекаем текст до первого двоеточия или конца строки.
-    # Это очень простой и потенциально ненадежный парсинг.
     pattern = r'^\s*(\d+)\.\s*(?:Название фильма:\s*)?([^:.]+)'
     matches = re.findall(pattern, gemini_response_text, re.MULTILINE)
 
@@ -227,10 +226,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     reply_markup = InlineKeyboardMarkup(keyboard)
 
-    await update.message.reply_html(
-        f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
-        "Пожалуйста, выберите один жанр:"
-    , reply_markup=reply_markup)
+    # В зависимости от того, откуда пришел вызов (команда или кнопка)
+    if update.message:
+        await update.message.reply_html(
+            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+            "Пожалуйста, выберите один жанр:"
+            , reply_markup=reply_markup)
+    elif update.callback_query:
+        await update.callback_query.message.reply_html(
+            f"Привет, {user.mention_html()}! Я бот для подбора фильмов. "
+            "Пожалуйста, выберите один жанр:"
+            , reply_markup=reply_markup)
     logger.info(f"Пользователь {user.id} начал поиск фильмов. Отправлено меню жанров.")
     return SELECT_GENRES
 
@@ -307,8 +313,6 @@ async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             )
         return ENTER_KEYWORDS
 
-    return SELECT_YEARS
-
 
 async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
@@ -367,15 +371,15 @@ async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             years=years_str,
             keywords=keywords,
             gemini_response=gemini_response_text,
-            film1_name=film_names[0], # Название параметра функции остается *_name
+            film1_name=film_names[0],
             film2_name=film_names[1],
             film3_name=film_names[2],
             username=user.username,
             first_name=user.first_name,
             last_name=user.last_name,
-            country=context.user_data.get('user_country', ''), # Взять из контекста, если есть
-            city=context.user_data.get('user_city', ''),       # Взять из контекста, если есть
-            phone_number=context.user_data.get('user_phone_number', '') # Взять из контекста, если есть
+            country=context.user_data.get('user_country', ''),
+            city=context.user_data.get('user_city', ''),
+            phone_number=context.user_data.get('user_phone_number', '')
         )
 
     except Exception as e:
@@ -490,11 +494,15 @@ def main() -> None:
                 CallbackQueryHandler(back_to_years, pattern="^back_to_years$")
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND | filters.TEXT, unknown)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),
+            CallbackQueryHandler(start, pattern="^start_over$"), # Перемещено сюда
+            MessageHandler(filters.COMMAND | filters.TEXT, unknown)
+        ],
     )
 
     application.add_handler(conv_handler)
-    application.add_handler(CallbackQueryHandler(start, pattern="^start_over$"))
+    # application.add_handler(CallbackQueryHandler(start, pattern="^start_over$")) # Эту строчку удаляем или комментируем
     application.add_handler(MessageHandler(filters.COMMAND, unknown))
 
     logger.info("Бот запущен. Ожидание сообщений...")
