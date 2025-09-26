@@ -1,258 +1,432 @@
-import os
-import logging
-import psycopg2
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, ContextTypes,
-    ConversationHandler, CallbackQueryHandler
-)
-from telegram.error import BadRequest
-import google.generativeai as genai
-from telegram.helpers import escape_markdown
-import re
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Пример выгрузки данных из 1С в Google Sheets
+Поддерживает два способа подключения к 1С:
+1. Через OData (веб-сервис)
+2. Через COM-объект (Windows)
+"""
 
-# --- Логирование ---
-logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+import json
+import logging
+from datetime import datetime
+from typing import List, Dict, Any, Optional
+import requests
+from requests.auth import HTTPBasicAuth
+import gspread
+from google.oauth2.service_account import Credentials
+
+# Настройка логирования
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- Состояния ---
-SELECT_GENRES, SELECT_YEARS, ENTER_KEYWORDS = range(3)
 
-# --- Переменные окружения ---
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN3")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY3")
-DATABASE_URL = os.getenv("DATABASE_URL3")
-
-if not TELEGRAM_BOT_TOKEN or not GEMINI_API_KEY or not DATABASE_URL:
-    logger.error("Одна или несколько переменных окружения не установлены.")
-    exit(1)
-
-# --- Настройка Gemini ---
-genai.configure(api_key=GEMINI_API_KEY)
-# model = genai.GenerativeModel('models/gemini-1.5-flash')
-model = genai.GenerativeModel('models/gemini-2.0-flash')
-
-# --- Справочники ---
-FILM_GENRES = {
-    "Боевик": "action", "Комедия": "comedy", "Драма": "drama",
-    "Триллер": "thriller", "Ужасы": "horror", "Фантастика": "sci-fi",
-    "Фэнтези": "fantasy", "Приключения": "adventure", "Мелодрама": "romance",
-    "Мультфильм": "animation", "Детектив": "mystery", "Исторический": "historical",
-    "Документальный": "documentary"
-}
-
-FILM_YEAR_RANGES = {
-    "00-е (2000-2009)": "2000-2009", "10-е (2010-2020)": "2010-2020", "20-е (2020-2029)": "2020-2029",
-    "30-е (1930-1939)": "1930-1939", "40-е (1940-1949)": "1940-1949", "50-е (1950-1959)": "1950-1959",
-    "60-е (1960-1969)": "1960-1969", "70-е (1970-1979)": "1970-1979", "80-е (1980-1989)": "1980-1989",
-    "90-е (1990-1999)": "1990-1999"
-}
-
-# --- DB ---
-def get_db_connection():
-    try:
-        return psycopg2.connect(DATABASE_URL)
-    except Exception as e:
-        logger.error(f"Ошибка подключения к базе: {e}")
-        return None
-
-def create_tables_if_not_exists():
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS users (
-                id BIGINT PRIMARY KEY, telegram_username VARCHAR(255),
-                first_name VARCHAR(255), last_name VARCHAR(255),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            );
-            CREATE TABLE IF NOT EXISTS films (
-                id SERIAL PRIMARY KEY, user_id BIGINT NOT NULL,
-                telegram_username VARCHAR(255), user_first_name VARCHAR(255), user_last_name VARCHAR(255),
-                user_country VARCHAR(255), genres TEXT NOT NULL, years TEXT NOT NULL, keywords TEXT,
-                film1 VARCHAR(255), film2 VARCHAR(255), film3 VARCHAR(255), gemini_response TEXT NOT NULL,
-                requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                user_city VARCHAR(255), user_phone_number VARCHAR(20),
-                FOREIGN KEY (user_id) REFERENCES users(id)
-            );
-        """)
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Ошибка при создании таблиц: {e}")
-    finally:
-        conn.close()
-
-async def save_user_data(user_id, username, first, last):
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cur = conn.cursor()
-        cur.execute("SELECT id FROM users WHERE id=%s", (user_id,))
-        if cur.fetchone() is None:
-            cur.execute("""
-                INSERT INTO users (id, telegram_username, first_name, last_name)
-                VALUES (%s, %s, %s, %s);
-            """, (user_id, username, first, last))
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Ошибка сохранения пользователя: {e}")
-    finally:
-        conn.close()
-
-async def save_film_request(user_id, genres, years, keywords, gemini_response,
-                            film1=None, film2=None, film3=None,
-                            username=None, first_name=None, last_name=None,
-                            country="", city="", phone=""):
-    conn = get_db_connection()
-    if not conn: return
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            INSERT INTO films (
-                user_id, telegram_username, user_first_name, user_last_name, user_country,
-                genres, years, keywords, gemini_response,
-                film1, film2, film3,
-                user_city, user_phone_number
-            )
-            VALUES (%s,%s,%s,%s,%s, %s,%s,%s,%s, %s,%s,%s, %s,%s);
-        """, (user_id, username, first_name, last_name, country,
-              genres, years, keywords, gemini_response,
-              film1, film2, film3, city, phone))
-        conn.commit()
-    except Exception as e:
-        logger.error(f"Ошибка сохранения фильма: {e}")
-    finally:
-        conn.close()
-
-# --- Парсинг Gemini ---
-def extract_film_names(text):
-    pattern = r'^\s*(\d+)\.\s*(?:Название фильма:\s*)?([^:.]+)'
-    matches = re.findall(pattern, text, re.MULTILINE)
-    result = [None, None, None]
-    for num_str, title in matches:
-        num = int(num_str)
-        if 1 <= num <= 3:
-            result[num-1] = re.sub(r'[,.]\s*$', '', title).strip()
-    return result
-
-# --- Хендлеры ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    await save_user_data(user.id, user.username, user.first_name, user.last_name)
-    context.user_data.clear()
-    context.user_data['selected_genres'] = []
-    context.user_data['selected_years'] = []
-
-    keyboard = [[InlineKeyboardButton(genre, callback_data=f"genre_{genre}")]
-                for genre in FILM_GENRES.keys()]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    if update.callback_query:
-        await update.callback_query.answer("Начинаем заново...")
+class OneCConnector:
+    """Класс для подключения к 1С"""
+    
+    def __init__(self, connection_type: str = "odata"):
+        self.connection_type = connection_type
+        self.connection = None
+        
+    def connect_odata(self, base_url: str, username: str, password: str, database: str):
+        """
+        Подключение к 1С через OData
+        
+        Args:
+            base_url: Базовый URL сервера 1С (например: http://server:port/base_name)
+            username: Имя пользователя
+            password: Пароль
+            database: Название базы данных
+        """
+        self.base_url = base_url.rstrip('/')
+        self.auth = HTTPBasicAuth(username, password)
+        self.database = database
+        
+        # Проверка подключения
         try:
-            await update.callback_query.message.edit_reply_markup(reply_markup=None)
-        except BadRequest:
-            pass
+            response = requests.get(
+                f"{self.base_url}/odata/standard.odata/$metadata",
+                auth=self.auth,
+                timeout=30
+            )
+            response.raise_for_status()
+            logger.info("Успешное подключение к 1С через OData")
+            return True
+        except Exception as e:
+            logger.error(f"Ошибка подключения к 1С через OData: {e}")
+            return False
+    
+    def connect_com(self):
+        """
+        Подключение к 1С через COM-объект (только Windows)
+        """
+        try:
+            import win32com.client
+            self.connection = win32com.client.Dispatch("V83.COMConnector")
+            logger.info("Успешное подключение к 1С через COM")
+            return True
+        except ImportError:
+            logger.error("COM-подключение доступно только на Windows с установленным pywin32")
+            return False
+        except Exception as e:
+            logger.error(f"Ошибка подключения к 1С через COM: {e}")
+            return False
+    
+    def get_data_odata(self, entity_name: str, filters: Optional[Dict] = None, 
+                      select_fields: Optional[List[str]] = None) -> List[Dict]:
+        """
+        Получение данных через OData
+        
+        Args:
+            entity_name: Название сущности (справочник, документ и т.д.)
+            filters: Фильтры для запроса
+            select_fields: Поля для выборки
+            
+        Returns:
+            Список записей
+        """
+        if self.connection_type != "odata":
+            raise ValueError("Метод доступен только для OData подключения")
+            
+        url = f"{self.base_url}/odata/standard.odata/{entity_name}"
+        params = {}
+        
+        # Добавляем поля для выборки
+        if select_fields:
+            params['$select'] = ','.join(select_fields)
+            
+        # Добавляем фильтры
+        if filters:
+            filter_conditions = []
+            for field, value in filters.items():
+                if isinstance(value, str):
+                    filter_conditions.append(f"{field} eq '{value}'")
+                else:
+                    filter_conditions.append(f"{field} eq {value}")
+            if filter_conditions:
+                params['$filter'] = ' and '.join(filter_conditions)
+        
+        # Добавляем формат JSON
+        params['$format'] = 'json'
+        
+        try:
+            response = requests.get(url, auth=self.auth, params=params, timeout=60)
+            response.raise_for_status()
+            
+            data = response.json()
+            records = data.get('value', [])
+            
+            logger.info(f"Получено {len(records)} записей из {entity_name}")
+            return records
+            
+        except Exception as e:
+            logger.error(f"Ошибка получения данных из {entity_name}: {e}")
+            return []
+    
+    def execute_query_com(self, connection_string: str, query: str) -> List[Dict]:
+        """
+        Выполнение запроса через COM-объект
+        
+        Args:
+            connection_string: Строка подключения к базе 1С
+            query: Текст запроса на языке запросов 1С
+            
+        Returns:
+            Результат запроса
+        """
+        if self.connection_type != "com" or not self.connection:
+            raise ValueError("COM подключение не инициализировано")
+            
+        try:
+            # Подключение к базе
+            infobase = self.connection.Connect(connection_string)
+            
+            # Создание и выполнение запроса
+            query_obj = infobase.NewObject("Query")
+            query_obj.Text = query
+            result = query_obj.Execute()
+            
+            # Преобразование результата в список словарей
+            records = []
+            selection = result.Choose()
+            while selection.Next():
+                record = {}
+                for i in range(result.Columns.Count()):
+                    column_name = result.Columns.Get(i).Name
+                    record[column_name] = selection.Get(column_name)
+                records.append(record)
+            
+            logger.info(f"Получено {len(records)} записей через COM")
+            return records
+            
+        except Exception as e:
+            logger.error(f"Ошибка выполнения COM запроса: {e}")
+            return []
 
-    await update.effective_message.reply_html(
-        f"Привет, {user.mention_html()}! Выбери жанр:", reply_markup=reply_markup)
-    return SELECT_GENRES
 
-async def select_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    genre = query.data.replace("genre_", "")
-    context.user_data['selected_genres'] = [genre]
+class GoogleSheetsUploader:
+    """Класс для работы с Google Sheets"""
+    
+    def __init__(self, credentials_file: str):
+        """
+        Инициализация подключения к Google Sheets
+        
+        Args:
+            credentials_file: Путь к файлу с учетными данными сервисного аккаунта
+        """
+        self.credentials_file = credentials_file
+        self.client = None
+        self._connect()
+    
+    def _connect(self):
+        """Подключение к Google Sheets API"""
+        try:
+            scope = [
+                'https://spreadsheets.google.com/feeds',
+                'https://www.googleapis.com/auth/drive'
+            ]
+            
+            credentials = Credentials.from_service_account_file(
+                self.credentials_file, scopes=scope
+            )
+            self.client = gspread.authorize(credentials)
+            logger.info("Успешное подключение к Google Sheets API")
+            
+        except Exception as e:
+            logger.error(f"Ошибка подключения к Google Sheets API: {e}")
+            raise
+    
+    def create_or_open_sheet(self, sheet_name: str, worksheet_name: str = "Лист1") -> gspread.Worksheet:
+        """
+        Создание или открытие таблицы
+        
+        Args:
+            sheet_name: Название таблицы
+            worksheet_name: Название листа
+            
+        Returns:
+            Объект листа
+        """
+        try:
+            # Попытка открыть существующую таблицу
+            spreadsheet = self.client.open(sheet_name)
+            logger.info(f"Открыта существующая таблица: {sheet_name}")
+        except gspread.SpreadsheetNotFound:
+            # Создание новой таблицы
+            spreadsheet = self.client.create(sheet_name)
+            logger.info(f"Создана новая таблица: {sheet_name}")
+        
+        # Получение или создание листа
+        try:
+            worksheet = spreadsheet.worksheet(worksheet_name)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=worksheet_name, rows=1000, cols=20)
+        
+        return worksheet
+    
+    def upload_data(self, worksheet: gspread.Worksheet, data: List[Dict], 
+                   clear_sheet: bool = True) -> bool:
+        """
+        Загрузка данных в лист
+        
+        Args:
+            worksheet: Объект листа
+            data: Данные для загрузки
+            clear_sheet: Очистить лист перед загрузкой
+            
+        Returns:
+            True если успешно, False если ошибка
+        """
+        if not data:
+            logger.warning("Нет данных для загрузки")
+            return False
+        
+        try:
+            # Очистка листа
+            if clear_sheet:
+                worksheet.clear()
+            
+            # Получение заголовков из первой записи
+            headers = list(data[0].keys())
+            
+            # Подготовка данных для загрузки
+            values = [headers]  # Заголовки
+            for record in data:
+                row = []
+                for header in headers:
+                    value = record.get(header, '')
+                    # Преобразование значений для Google Sheets
+                    if isinstance(value, datetime):
+                        value = value.strftime('%Y-%m-%d %H:%M:%S')
+                    elif value is None:
+                        value = ''
+                    row.append(str(value))
+                values.append(row)
+            
+            # Загрузка данных
+            worksheet.update('A1', values)
+            
+            logger.info(f"Загружено {len(data)} записей в лист {worksheet.title}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Ошибка загрузки данных: {e}")
+            return False
 
-    keyboard = [[InlineKeyboardButton(year, callback_data=f"year_{year}")]
-                for year in FILM_YEAR_RANGES]
-    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="back_to_genres")])
-    await query.edit_message_text(f"Вы выбрали жанр: *{genre}*\n\nТеперь выбери годы:",
-                                  parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_YEARS
 
-async def select_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    await query.answer()
-    year = query.data.replace("year_", "")
-    context.user_data['selected_years'] = [year]
-    genre = context.user_data['selected_genres'][0]
+class OneCToGoogleSheetsExporter:
+    """Основной класс для экспорта данных из 1С в Google Sheets"""
+    
+    def __init__(self, config_file: str = "config.json"):
+        """
+        Инициализация экспортера
+        
+        Args:
+            config_file: Путь к файлу конфигурации
+        """
+        self.config = self._load_config(config_file)
+        self.onec_connector = OneCConnector(self.config.get('connection_type', 'odata'))
+        self.sheets_uploader = GoogleSheetsUploader(self.config['google_credentials_file'])
+    
+    def _load_config(self, config_file: str) -> Dict:
+        """Загрузка конфигурации из файла"""
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except FileNotFoundError:
+            logger.error(f"Файл конфигурации {config_file} не найден")
+            raise
+        except json.JSONDecodeError as e:
+            logger.error(f"Ошибка в файле конфигурации: {e}")
+            raise
+    
+    def export_odata_entity(self, entity_name: str, sheet_name: str, 
+                           worksheet_name: str = "Данные", 
+                           filters: Optional[Dict] = None,
+                           select_fields: Optional[List[str]] = None):
+        """
+        Экспорт сущности 1С через OData в Google Sheets
+        
+        Args:
+            entity_name: Название сущности в 1С
+            sheet_name: Название таблицы Google Sheets
+            worksheet_name: Название листа
+            filters: Фильтры для данных
+            select_fields: Поля для выборки
+        """
+        logger.info(f"Начало экспорта {entity_name} в {sheet_name}")
+        
+        # Подключение к 1С
+        if not self.onec_connector.connect_odata(
+            self.config['onec_odata_url'],
+            self.config['onec_username'],
+            self.config['onec_password'],
+            self.config['onec_database']
+        ):
+            return False
+        
+        # Получение данных из 1С
+        data = self.onec_connector.get_data_odata(entity_name, filters, select_fields)
+        
+        if not data:
+            logger.warning("Нет данных для экспорта")
+            return False
+        
+        # Создание/открытие листа Google Sheets
+        worksheet = self.sheets_uploader.create_or_open_sheet(sheet_name, worksheet_name)
+        
+        # Загрузка данных
+        success = self.sheets_uploader.upload_data(worksheet, data)
+        
+        if success:
+            logger.info(f"Экспорт {entity_name} завершен успешно")
+        else:
+            logger.error(f"Ошибка при экспорте {entity_name}")
+        
+        return success
+    
+    def export_com_query(self, query: str, sheet_name: str, 
+                        worksheet_name: str = "Данные"):
+        """
+        Экспорт результата запроса 1С через COM в Google Sheets
+        
+        Args:
+            query: Текст запроса на языке запросов 1С
+            sheet_name: Название таблицы Google Sheets
+            worksheet_name: Название листа
+        """
+        logger.info(f"Начало экспорта запроса в {sheet_name}")
+        
+        # Подключение к 1С через COM
+        if not self.onec_connector.connect_com():
+            return False
+        
+        # Выполнение запроса
+        data = self.onec_connector.execute_query_com(
+            self.config['onec_com_connection_string'],
+            query
+        )
+        
+        if not data:
+            logger.warning("Нет данных для экспорта")
+            return False
+        
+        # Создание/открытие листа Google Sheets
+        worksheet = self.sheets_uploader.create_or_open_sheet(sheet_name, worksheet_name)
+        
+        # Загрузка данных
+        success = self.sheets_uploader.upload_data(worksheet, data)
+        
+        if success:
+            logger.info("Экспорт запроса завершен успешно")
+        else:
+            logger.error("Ошибка при экспорте запроса")
+        
+        return success
 
-    await query.edit_message_text(
-        f"Вы выбрали:\nЖанр: *{genre}*\nГоды: *{year}*\n\nВведите ключевые слова:",
-        parse_mode='Markdown',
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="back_to_years")]])
-    )
-    return ENTER_KEYWORDS
-
-async def handle_keywords(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    keywords = update.message.text
-    genres = ", ".join(context.user_data['selected_genres'])
-    years = ", ".join([FILM_YEAR_RANGES[y] for y in context.user_data['selected_years']])
-
-    await update.message.reply_text("Ищу лучшие фильмы, подождите...")
-    prompt = f"ТОП-3 фильмов в жанре {genres}, {years}. По ключевым словам: '{keywords}'..."
-    try:
-        response = model.generate_content(prompt)
-        text = response.text
-        films = extract_film_names(text)
-        await update.message.reply_text(text)
-        await save_film_request(user.id, genres, years, keywords, text,
-                                films[0], films[1], films[2], user.username,
-                                user.first_name, user.last_name)
-    except Exception as e:
-        logger.error(f"Ошибка Gemini: {e}")
-        await update.message.reply_text("Произошла ошибка. Попробуйте позже.")
-
-    await update.message.reply_text("Хотите попробовать еще раз?", reply_markup=InlineKeyboardMarkup([
-        [InlineKeyboardButton("Начать новый поиск", callback_data="start_over")]
-    ]))
-    return ConversationHandler.END
-
-async def back_to_genres(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.callback_query.answer()
-    return await start(update, context)
-
-async def back_to_years(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.callback_query.answer()
-    return await select_genres(update, context)
-
-async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("Поиск отменен. Используйте /start для начала.")
-    context.user_data.clear()
-    return ConversationHandler.END
-
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Неизвестная команда. Используйте /start")
 
 def main():
-    create_tables_if_not_exists()
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    """Пример использования"""
+    try:
+        # Создание экспортера
+        exporter = OneCToGoogleSheetsExporter()
+        
+        # Пример 1: Экспорт справочника "Номенклатура" через OData
+        exporter.export_odata_entity(
+            entity_name="Catalog_Номенклатура",
+            sheet_name="Номенклатура из 1С",
+            select_fields=["Ref_Key", "Description", "Артикул", "ЕдиницаИзмерения"]
+        )
+        
+        # Пример 2: Экспорт документов "Реализация товаров и услуг" с фильтром по дате
+        exporter.export_odata_entity(
+            entity_name="Document_РеализацияТоваровУслуг",
+            sheet_name="Продажи за месяц",
+            filters={"Date": "2024-01-01T00:00:00"},
+            select_fields=["Ref_Key", "Date", "Number", "Контрагент", "СуммаДокумента"]
+        )
+        
+        # Пример 3: Экспорт произвольного запроса через COM (только для Windows)
+        query = """
+        ВЫБРАТЬ
+            Номенклатура.Наименование КАК Товар,
+            СУММА(ПродажиОбороты.Количество) КАК КоличествоПродано,
+            СУММА(ПродажиОбороты.Сумма) КАК СуммаПродаж
+        ИЗ
+            РегистрНакопления.Продажи.Обороты КАК ПродажиОбороты
+            ЛЕВОЕ СОЕДИНЕНИЕ Справочник.Номенклатура КАК Номенклатура
+            ПО ПродажиОбороты.Номенклатура = Номенклатура.Ссылка
+        СГРУППИРОВАТЬ ПО
+            Номенклатура.Наименование
+        УПОРЯДОЧИТЬ ПО
+            СуммаПродаж УБЫВ
+        """
+        
+        # exporter.export_com_query(query, "Отчет по продажам")
+        
+    except Exception as e:
+        logger.error(f"Ошибка в основной функции: {e}")
 
-    conv_handler = ConversationHandler(
-        entry_points=[
-            CommandHandler("start", start),
-            CallbackQueryHandler(start, pattern="^start_over$")
-        ],
-        states={
-            SELECT_GENRES: [CallbackQueryHandler(select_genres, pattern="^genre_")],
-            SELECT_YEARS: [
-                CallbackQueryHandler(select_years, pattern="^year_"),
-                CallbackQueryHandler(back_to_genres, pattern="^back_to_genres$")
-            ],
-            ENTER_KEYWORDS: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_keywords),
-                CallbackQueryHandler(back_to_years, pattern="^back_to_years$")
-            ],
-        },
-        fallbacks=[CommandHandler("cancel", cancel), MessageHandler(filters.COMMAND, unknown)]
-    )
-
-    app.add_handler(conv_handler)
-    logger.info("Бот запущен...")
-    app.run_polling()
 
 if __name__ == "__main__":
     main()
