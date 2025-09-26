@@ -1,0 +1,12 @@
+{
+  "connection_type": "odata",
+  
+  "onec_odata_url": "http://your-1c-server:port/your-base-name",
+  "onec_username": "your-username",
+  "onec_password": "your-password", 
+  "onec_database": "your-database-name",
+  
+  "onec_com_connection_string": "Srvr=\"server-name\";Ref=\"database-name\";Usr=\"username\";Pwd=\"password\";",
+  
+  "google_credentials_file": "google_service_account.json"
+}
